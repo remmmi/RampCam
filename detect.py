@@ -64,6 +64,15 @@ MIN_AREA_DEFAULT = 80
 CORRUPT_SAT_MIN = 150       # saturation HSV mini pour qu'un pixel compte comme "néon"
 CORRUPT_VAL_MIN = 100       # luminosité HSV mini (ignore le bruit sombre)
 CORRUPT_SAT_FRAC_MAX = 0.05  # fraction max de pixels néon avant de juger la frame corrompue
+
+# Détection à 2 étages : fond adaptatif (MOG2) + confirmation YOLO
+MOG2_HISTORY = 500            # nb de frames pour le modèle de fond
+MOG2_VAR_THRESHOLD = 16       # seuil de variance MOG2 (défaut OpenCV)
+YOLO_CONFIRM_CONF = 0.4       # confiance mini pour confirmer une classe
+YOLO_CONFIRM_FRAMES = 3       # nb de frames saines à analyser au plus
+YOLO_CONFIRM_INTERVAL = 0.2   # délai (s) entre frames de la rafale
+YOLO_CONFIRM_MAX_FETCH = 6    # borne de tentatives (anti-boucle si glitch en rafale)
+YOLO_CHECK_COOLDOWN_SECS = 3  # délai mini entre deux confirmations YOLO (mouvement non confirmé)
 TRIGGER_COOLDOWN_SECS = 25  # évite les déclenchements trop fréquents
 
 # Enregistrement (durée en secondes)
@@ -297,6 +306,10 @@ def _compute_yolo_score(frame):
     except Exception as e:
         log(f"Ntfy: erreur YOLO - {e}")
         return 0.0
+
+def is_interesting_detection(class_id, confidence, threshold=YOLO_CONFIRM_CONF):
+    """Règle de décision : vrai si la classe est surveillée ET la confiance suffisante."""
+    return class_id in INTERESTING_CLASSES and confidence >= threshold
 
 def select_best_frame(candidates):
     """Selectionne la meilleure frame parmi les candidates (score hybride mouvement+YOLO)."""
