@@ -565,6 +565,11 @@ def detection(args):
             time.sleep(delay)
             continue
 
+        if is_corrupted_frame(frame):
+            log("Frame corrompue ignorée")
+            time.sleep(delay)
+            continue
+
         prebuffer_frames.append(frame.copy())
 
         if mask is not None and mask_rs is None:
