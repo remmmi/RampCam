@@ -1,0 +1,52 @@
+--- detect_orig.py	2025-07-31 10:00:00.000000000 +0200
++++ detect_mod.py	2025-07-31 10:30:00.000000000 +0200
+@@
+ prebuffer_frames = deque(maxlen=25)  # 5 sec @ 5 FPS
++prebuffer_frames = deque(maxlen=15)  # 3 sec @ 5 FPS
+@@
+-def create_buffer_video_window(buffer_frames, duration=20):
+-    frames = list(buffer_frames)
+-    if not frames:
+-        return None
+-    return {'frames': frames, 'duration': duration, 'idx': 0}
++def create_buffer_video_window(frames, fps):
++    if not frames:
++        return None
++    return {'frames': frames, 'fps': fps, 'idx': 0}
+@@
+-        Thread(target=record_video, args=(url, auth, list(prebuffer_frames)), daemon=True).start()
+-        ui_queue.put(('show_video', create_buffer_video_window(prebuffer_frames, duration=40)))
++        buffer1 = list(prebuffer_frames)
++        buffer2 = []
++        for _ in range(15 * args.fps):
++            frame2 = fetch_image(url, auth)
++            if frame2 is not None:
++                buffer2.append(frame2)
++            time.sleep(delay)
++
++        combined = buffer1 + buffer2
++        ui_queue.put(('show_video', create_buffer_video_window(combined, args.fps)))
++        Thread(target=record_video, args=(url, auth, combined), daemon=True).start()
++        del buffer2
+@@
+-def show_buffer_video(parent, video_data):
+-    frames = video_data['frames']
+-    duration = video_data['duration']  # en secondes
++def show_buffer_video(parent, video_data):
++    frames = video_data['frames']
++    fps = video_data['fps']
+@@
+-        if idx >= len(frames):
+-            video_data['idx'] = 0
+-            idx = 0
++        if idx >= len(frames):
++            close()
++            return
+@@
+-        video_data['idx'] += 1
+-        video_window.after(int(1000 / 5), update_frame)  # 5 FPS
++        video_data['idx'] += 1
++        video_window.after(int(1000 / fps), update_frame)
+@@
+-    video_window.after(duration * 1000, close)
++    # ne pas boucler, on ferme en fin de frames

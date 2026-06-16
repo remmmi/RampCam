@@ -1,0 +1,16 @@
+# Donnees generees / runtime
+captures/
+captures_annotated/
+captures2/
+logs/
+tmp/
+*.avi
+*.out
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Sauvegardes
+*.BAK
