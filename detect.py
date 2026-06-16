@@ -72,7 +72,8 @@ YOLO_CONFIRM_CONF = 0.4       # confiance mini pour confirmer une classe
 YOLO_CONFIRM_FRAMES = 3       # nb de frames saines à analyser au plus
 YOLO_CONFIRM_INTERVAL = 0.2   # délai (s) entre frames de la rafale
 YOLO_CONFIRM_MAX_FETCH = 6    # borne de tentatives (anti-boucle si glitch en rafale)
-YOLO_CHECK_COOLDOWN_SECS = 3  # délai mini entre deux confirmations YOLO (mouvement non confirmé)
+YOLO_CHECK_COOLDOWN_SECS = 2  # délai mini entre deux confirmations YOLO sur mouvement non confirmé
+                              # (compromis : plus court = plus réactif mais plus de CPU YOLO)
 TRIGGER_COOLDOWN_SECS = 25  # évite les déclenchements trop fréquents
 
 # Enregistrement (durée en secondes)
@@ -608,10 +609,12 @@ def detection(args):
     url = CAMERA_URL
     auth = CAMERA_AUTH
     delay = 1 / args.fps
-    prev = None
+    last_motion_check = 0
 
     mask = load_surveillance_mask()
     mask_rs = None
+    bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+        history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=True)
 
     # Laisse la CLI overrider la rétention via --max-age-hours
     Thread(target=clean_old_videos, args=(CAPTURES_DIR, args.max_age_hours, CLEAN_INTERVAL_SECONDS), daemon=True).start()
@@ -639,40 +642,39 @@ def detection(args):
             mask_rs = (mask_rs > 127).astype(np.uint8) * 255
             log(f"Masque redimensionné : {mask.shape} → {mask_rs.shape}")
 
-        gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (21, 21), 0)
-        if prev is None:
-            prev = gray
-            time.sleep(delay)
-            continue
-
-        delta = cv2.absdiff(prev, gray)
-        thresh = cv2.dilate(cv2.threshold(delta, args.sensitivity, 255, cv2.THRESH_BINARY)[1],
-                            None, iterations=2)
+        fgmask = bg_subtractor.apply(frame)
+        # MOG2 marque les ombres à 127 ; on ne garde que l'avant-plan franc (255)
+        fgmask = (fgmask >= 250).astype(np.uint8) * 255
+        fgmask = cv2.dilate(fgmask, None, iterations=2)
 
         if mask_rs is not None:
-            thresh = cv2.bitwise_and(thresh, thresh, mask=mask_rs)
-            # Debug overlay : sauvegarde image réelle + masque coloré
-            #debug_img = debug_overlay(frame, mask_rs, alpha=0.4)
-            #cv2.imwrite("/tmp/debug_overlay.png", debug_img)
+            fgmask = cv2.bitwise_and(fgmask, fgmask, mask=mask_rs)
 
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        max_area = max((cv2.contourArea(c) for c in contours), default=0)
+        contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         moviment = any(cv2.contourArea(c) >= args.min_area for c in contours)
 
         now = time.time()
-        if moviment and now - last_trigger_time > TRIGGER_COOLDOWN_SECS:
+        # last_motion_check : rate-limite les vérifications YOLO sur mouvement non confirmé.
+        # last_trigger_time : cooldown long après un déclenchement réellement confirmé.
+        if (moviment and now - last_motion_check > YOLO_CHECK_COOLDOWN_SECS
+                and now - last_trigger_time > TRIGGER_COOLDOWN_SECS):
+            last_motion_check = now
             log("Mouvement détecté")
-            last_trigger_time = now
-            beep_stop = Event()
-            beep_procs = beep(1, stop_event=beep_stop)
-            Thread(target=record_video,
-                   args=(url, auth, list(prebuffer_frames)),
-                   kwargs={"duration": args.record_duration, "fps": args.fps},
-                   daemon=True).start()
-            ui_queue.put(("show_video",
-                          build_video_data(prebuffer_frames, url, auth, args.fps, args.prebuffer_secs, args.live_secs,
-                                         beep_stop, beep_procs)))
-        prev = gray
+            confirmed, label, conf = confirm_interesting_object(url, auth, frame)
+            if confirmed:
+                last_trigger_time = now
+                log(f"Confirmation YOLO: {label or 'fail-open'} ({conf:.2f})")
+                beep_stop = Event()
+                beep_procs = beep(1, stop_event=beep_stop)
+                Thread(target=record_video,
+                       args=(url, auth, list(prebuffer_frames)),
+                       kwargs={"duration": args.record_duration, "fps": args.fps},
+                       daemon=True).start()
+                ui_queue.put(("show_video",
+                              build_video_data(prebuffer_frames, url, auth, args.fps, args.prebuffer_secs, args.live_secs,
+                                             beep_stop, beep_procs)))
+            else:
+                log("Confirmation YOLO: aucune classe interessante")
         time.sleep(delay)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -684,7 +686,7 @@ def main():
     p.add_argument("--prebuffer-secs", type=int, default=PREBUFFER_SECS, help="Durée du prébuffer (s)")
     p.add_argument("--live-secs", type=int, default=LIVE_SECS, help="Durée du live (s)")
     p.add_argument("--record-duration", type=int, default=RECORD_DURATION, help="Durée d'enregistrement live (s)")
-    p.add_argument("--sensitivity", type=int, default=SENSITIVITY_DEFAULT, help="Seuil diff (1-255)")
+    p.add_argument("--sensitivity", type=int, default=SENSITIVITY_DEFAULT, help="Ignoré (MOG2 utilise MOG2_VAR_THRESHOLD) - conservé pour compat CLI")
     p.add_argument("--min-area", type=int, default=MIN_AREA_DEFAULT, help="Surface min px²")
     p.add_argument("--max-age-hours", type=int, default=MAX_AGE_HOURS_DEFAULT, help="Rétention vidéos")
     p.add_argument("--test", action="store_true", help="Simule un mouvement toutes les 40s")
