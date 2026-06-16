@@ -312,30 +312,48 @@ def is_interesting_detection(class_id, confidence, threshold=YOLO_CONFIRM_CONF):
     """Règle de décision : vrai si la classe est surveillée ET la confiance suffisante."""
     return class_id in INTERESTING_CLASSES and confidence >= threshold
 
-def _detect_interesting(frame):
-    """Renvoie (class_id, confiance) de la meilleure détection d'une classe surveillée,
-    (None, 0.0) sinon. Ne capture PAS les exceptions : elles remontent pour le fail-safe."""
-    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
-    yolo_net.setInput(blob)
-    outputs = yolo_net.forward(yolo_output_layers)
+def _best_interesting(outputs, w, h, mask=None):
+    """Meilleure (class_id, confiance) parmi les classes surveillées, (None, 0.0) sinon.
+    - Confiance = objectness * proba_classe (confiance YOLO standard).
+    - Si un masque est fourni, le centre de la boîte doit tomber dans une zone
+      surveillée (mask[cy, cx] != 0) ; sinon la détection est ignorée."""
     best_conf = 0.0
     best_id = None
     for output in outputs:
         for detection in output:
+            objectness = float(detection[4])
             scores = detection[5:]
             class_id = int(np.argmax(scores))
-            confidence = float(scores[class_id])
-            if class_id in INTERESTING_CLASSES and confidence > best_conf:
-                best_conf = confidence
-                best_id = class_id
+            confidence = objectness * float(scores[class_id])
+            if class_id not in INTERESTING_CLASSES or confidence <= best_conf:
+                continue
+            if mask is not None:
+                cx = int(detection[0] * w)
+                cy = int(detection[1] * h)
+                if cx < 0 or cy < 0 or cx >= w or cy >= h or mask[cy, cx] == 0:
+                    continue
+            best_conf = confidence
+            best_id = class_id
     return best_id, best_conf
 
 
-def confirm_interesting_object(url, auth, first_frame):
+def _detect_interesting(frame, mask=None):
+    """Renvoie (class_id, confiance) de la meilleure détection d'une classe surveillée
+    dans la zone du masque, (None, 0.0) sinon.
+    Ne capture PAS les exceptions : elles remontent pour le fail-safe."""
+    h, w = frame.shape[:2]
+    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
+    yolo_net.setInput(blob)
+    outputs = yolo_net.forward(yolo_output_layers)
+    return _best_interesting(outputs, w, h, mask)
+
+
+def confirm_interesting_object(url, auth, first_frame, mask=None):
     """Confirme la présence d'une classe surveillée via YOLO sur une rafale de frames.
     Renvoie (confirmé: bool, label: str|None, confiance: float).
     - Analyse d'abord first_frame (déjà filtrée), puis récupère des frames live.
     - Ignore les frames corrompues / None (ne comptent pas, on en refetch une autre).
+    - Restreint les détections à la zone du masque (objet hors zone = ignoré).
     - Fail-safe : YOLO indisponible ou inférence en erreur -> (True, None, 0.0)."""
     if yolo_net is None:
         return True, None, 0.0
@@ -344,7 +362,7 @@ def confirm_interesting_object(url, auth, first_frame):
     try:
         for _ in range(YOLO_CONFIRM_MAX_FETCH):
             if frame is not None and not is_corrupted_frame(frame):
-                class_id, conf = _detect_interesting(frame)
+                class_id, conf = _detect_interesting(frame, mask)
                 if class_id is not None and is_interesting_detection(class_id, conf):
                     return True, INTERESTING_CLASSES[class_id], conf
                 analysed += 1
@@ -660,7 +678,7 @@ def detection(args):
                 and now - last_trigger_time > TRIGGER_COOLDOWN_SECS):
             last_motion_check = now
             log("Mouvement détecté")
-            confirmed, label, conf = confirm_interesting_object(url, auth, frame)
+            confirmed, label, conf = confirm_interesting_object(url, auth, frame, mask_rs)
             if confirmed:
                 last_trigger_time = now
                 log(f"Confirmation YOLO: {label or 'fail-open'} ({conf:.2f})")

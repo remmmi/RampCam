@@ -42,6 +42,54 @@ def test_confirm_failsafe_when_yolo_unavailable():
         detect.yolo_net = saved
 
 
+def test_best_interesting_uses_objectness():
+    # voiture (classe 2) : proba classe 0.50 mais objectness faible 0.36 -> conf = 0.18
+    det = np.zeros((1, 5 + 80), dtype=np.float32)
+    det[0, 4] = 0.36       # objectness
+    det[0, 5 + 2] = 0.50   # proba 'voiture'
+    class_id, conf = detect._best_interesting([det], 640, 480)
+    assert class_id == 2
+    assert abs(conf - 0.18) < 1e-3
+    # donc rejeté par la règle de décision (seuil 0.4)
+    assert detect.is_interesting_detection(class_id, conf) is False
+
+
+def test_best_interesting_strong_detection():
+    det = np.zeros((1, 5 + 80), dtype=np.float32)
+    det[0, 4] = 0.9
+    det[0, 5 + 2] = 0.8
+    class_id, conf = detect._best_interesting([det], 640, 480)
+    assert class_id == 2
+    assert abs(conf - 0.72) < 1e-3
+
+
+def test_best_interesting_rejects_detection_out_of_mask():
+    # détection forte mais centre hors zone surveillée -> ignorée
+    det = np.zeros((1, 5 + 80), dtype=np.float32)
+    det[0, 0] = 0.95       # centre x (haut-droite)
+    det[0, 1] = 0.2        # centre y
+    det[0, 4] = 0.9
+    det[0, 5 + 2] = 0.9
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[240:480, 0:320] = 255   # zone surveillée = bas-gauche
+    class_id, conf = detect._best_interesting([det], 640, 480, mask)
+    assert class_id is None
+    assert conf == 0.0
+
+
+def test_best_interesting_keeps_detection_in_mask():
+    det = np.zeros((1, 5 + 80), dtype=np.float32)
+    det[0, 0] = 0.25       # centre x (bas-gauche)
+    det[0, 1] = 0.75       # centre y
+    det[0, 4] = 0.9
+    det[0, 5 + 2] = 0.9
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[240:480, 0:320] = 255
+    class_id, conf = detect._best_interesting([det], 640, 480, mask)
+    assert class_id == 2
+    assert abs(conf - 0.81) < 1e-3
+
+
 def test_detect_interesting_blank_frame_no_object():
     # Une frame noire ne contient aucun objet -> (None, 0.0).
     if detect.yolo_net is None:
@@ -59,7 +107,7 @@ def test_confirm_returns_on_first_interesting_frame():
              detect._detect_interesting, detect.fetch_image)
     detect.yolo_net = object()
     detect.is_corrupted_frame = lambda f: False
-    detect._detect_interesting = lambda f: (0, 0.9)  # 0 = personne
+    detect._detect_interesting = lambda f, m=None: (0, 0.9)  # 0 = personne
     calls = {"fetch": 0}
 
     def fake_fetch(u, a):
@@ -84,7 +132,7 @@ def test_confirm_skips_corrupted_without_consuming_budget():
     detect.is_corrupted_frame = lambda f: f == "bad"
     analyse = {"n": 0}
 
-    def fake_detect(f):
+    def fake_detect(f, m=None):
         analyse["n"] += 1
         return (None, 0.0)  # jamais de classe intéressante
 
