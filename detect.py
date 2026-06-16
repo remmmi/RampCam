@@ -311,6 +311,51 @@ def is_interesting_detection(class_id, confidence, threshold=YOLO_CONFIRM_CONF):
     """Règle de décision : vrai si la classe est surveillée ET la confiance suffisante."""
     return class_id in INTERESTING_CLASSES and confidence >= threshold
 
+def _detect_interesting(frame):
+    """Renvoie (class_id, confiance) de la meilleure détection d'une classe surveillée,
+    (None, 0.0) sinon. Ne capture PAS les exceptions : elles remontent pour le fail-safe."""
+    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
+    yolo_net.setInput(blob)
+    outputs = yolo_net.forward(yolo_output_layers)
+    best_conf = 0.0
+    best_id = None
+    for output in outputs:
+        for detection in output:
+            scores = detection[5:]
+            class_id = int(np.argmax(scores))
+            confidence = float(scores[class_id])
+            if class_id in INTERESTING_CLASSES and confidence > best_conf:
+                best_conf = confidence
+                best_id = class_id
+    return best_id, best_conf
+
+
+def confirm_interesting_object(url, auth, first_frame):
+    """Confirme la présence d'une classe surveillée via YOLO sur une rafale de frames.
+    Renvoie (confirmé: bool, label: str|None, confiance: float).
+    - Analyse d'abord first_frame (déjà filtrée), puis récupère des frames live.
+    - Ignore les frames corrompues / None (ne comptent pas, on en refetch une autre).
+    - Fail-safe : YOLO indisponible ou inférence en erreur -> (True, None, 0.0)."""
+    if yolo_net is None:
+        return True, None, 0.0
+    frame = first_frame
+    analysed = 0
+    try:
+        for _ in range(YOLO_CONFIRM_MAX_FETCH):
+            if frame is not None and not is_corrupted_frame(frame):
+                class_id, conf = _detect_interesting(frame)
+                if class_id is not None and is_interesting_detection(class_id, conf):
+                    return True, INTERESTING_CLASSES[class_id], conf
+                analysed += 1
+                if analysed >= YOLO_CONFIRM_FRAMES:
+                    break
+            time.sleep(YOLO_CONFIRM_INTERVAL)
+            frame = fetch_image(url, auth)
+        return False, None, 0.0
+    except Exception as e:
+        log(f"Confirmation YOLO: erreur, laisse passer - {e}")
+        return True, None, 0.0
+
 def select_best_frame(candidates):
     """Selectionne la meilleure frame parmi les candidates (score hybride mouvement+YOLO)."""
     if not candidates:
