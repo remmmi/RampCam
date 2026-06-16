@@ -64,6 +64,16 @@ MIN_AREA_DEFAULT = 80
 CORRUPT_SAT_MIN = 150       # saturation HSV mini pour qu'un pixel compte comme "néon"
 CORRUPT_VAL_MIN = 100       # luminosité HSV mini (ignore le bruit sombre)
 CORRUPT_SAT_FRAC_MAX = 0.05  # fraction max de pixels néon avant de juger la frame corrompue
+
+# Détection à 2 étages : fond adaptatif (MOG2) + confirmation YOLO
+MOG2_HISTORY = 500            # nb de frames pour le modèle de fond
+MOG2_VAR_THRESHOLD = 16       # seuil de variance MOG2 (défaut OpenCV)
+YOLO_CONFIRM_CONF = 0.4       # confiance mini pour confirmer une classe
+YOLO_CONFIRM_FRAMES = 3       # nb de frames saines à analyser au plus
+YOLO_CONFIRM_INTERVAL = 0.2   # délai (s) entre frames de la rafale
+YOLO_CONFIRM_MAX_FETCH = 6    # borne de tentatives (anti-boucle si glitch en rafale)
+YOLO_CHECK_COOLDOWN_SECS = 2  # délai mini entre deux confirmations YOLO sur mouvement non confirmé
+                              # (compromis : plus court = plus réactif mais plus de CPU YOLO)
 TRIGGER_COOLDOWN_SECS = 25  # évite les déclenchements trop fréquents
 
 # Enregistrement (durée en secondes)
@@ -297,6 +307,55 @@ def _compute_yolo_score(frame):
     except Exception as e:
         log(f"Ntfy: erreur YOLO - {e}")
         return 0.0
+
+def is_interesting_detection(class_id, confidence, threshold=YOLO_CONFIRM_CONF):
+    """Règle de décision : vrai si la classe est surveillée ET la confiance suffisante."""
+    return class_id in INTERESTING_CLASSES and confidence >= threshold
+
+def _detect_interesting(frame):
+    """Renvoie (class_id, confiance) de la meilleure détection d'une classe surveillée,
+    (None, 0.0) sinon. Ne capture PAS les exceptions : elles remontent pour le fail-safe."""
+    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
+    yolo_net.setInput(blob)
+    outputs = yolo_net.forward(yolo_output_layers)
+    best_conf = 0.0
+    best_id = None
+    for output in outputs:
+        for detection in output:
+            scores = detection[5:]
+            class_id = int(np.argmax(scores))
+            confidence = float(scores[class_id])
+            if class_id in INTERESTING_CLASSES and confidence > best_conf:
+                best_conf = confidence
+                best_id = class_id
+    return best_id, best_conf
+
+
+def confirm_interesting_object(url, auth, first_frame):
+    """Confirme la présence d'une classe surveillée via YOLO sur une rafale de frames.
+    Renvoie (confirmé: bool, label: str|None, confiance: float).
+    - Analyse d'abord first_frame (déjà filtrée), puis récupère des frames live.
+    - Ignore les frames corrompues / None (ne comptent pas, on en refetch une autre).
+    - Fail-safe : YOLO indisponible ou inférence en erreur -> (True, None, 0.0)."""
+    if yolo_net is None:
+        return True, None, 0.0
+    frame = first_frame
+    analysed = 0
+    try:
+        for _ in range(YOLO_CONFIRM_MAX_FETCH):
+            if frame is not None and not is_corrupted_frame(frame):
+                class_id, conf = _detect_interesting(frame)
+                if class_id is not None and is_interesting_detection(class_id, conf):
+                    return True, INTERESTING_CLASSES[class_id], conf
+                analysed += 1
+                if analysed >= YOLO_CONFIRM_FRAMES:
+                    break
+            time.sleep(YOLO_CONFIRM_INTERVAL)
+            frame = fetch_image(url, auth)
+        return False, None, 0.0
+    except Exception as e:
+        log(f"Confirmation YOLO: erreur, laisse passer - {e}")
+        return True, None, 0.0
 
 def select_best_frame(candidates):
     """Selectionne la meilleure frame parmi les candidates (score hybride mouvement+YOLO)."""
@@ -550,10 +609,12 @@ def detection(args):
     url = CAMERA_URL
     auth = CAMERA_AUTH
     delay = 1 / args.fps
-    prev = None
+    last_motion_check = 0
 
     mask = load_surveillance_mask()
     mask_rs = None
+    bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+        history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=True)
 
     # Laisse la CLI overrider la rétention via --max-age-hours
     Thread(target=clean_old_videos, args=(CAPTURES_DIR, args.max_age_hours, CLEAN_INTERVAL_SECONDS), daemon=True).start()
@@ -581,40 +642,39 @@ def detection(args):
             mask_rs = (mask_rs > 127).astype(np.uint8) * 255
             log(f"Masque redimensionné : {mask.shape} → {mask_rs.shape}")
 
-        gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (21, 21), 0)
-        if prev is None:
-            prev = gray
-            time.sleep(delay)
-            continue
-
-        delta = cv2.absdiff(prev, gray)
-        thresh = cv2.dilate(cv2.threshold(delta, args.sensitivity, 255, cv2.THRESH_BINARY)[1],
-                            None, iterations=2)
+        fgmask = bg_subtractor.apply(frame)
+        # MOG2 marque les ombres à 127 ; on ne garde que l'avant-plan franc (255)
+        fgmask = (fgmask >= 250).astype(np.uint8) * 255
+        fgmask = cv2.dilate(fgmask, None, iterations=2)
 
         if mask_rs is not None:
-            thresh = cv2.bitwise_and(thresh, thresh, mask=mask_rs)
-            # Debug overlay : sauvegarde image réelle + masque coloré
-            #debug_img = debug_overlay(frame, mask_rs, alpha=0.4)
-            #cv2.imwrite("/tmp/debug_overlay.png", debug_img)
+            fgmask = cv2.bitwise_and(fgmask, fgmask, mask=mask_rs)
 
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        max_area = max((cv2.contourArea(c) for c in contours), default=0)
+        contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         moviment = any(cv2.contourArea(c) >= args.min_area for c in contours)
 
         now = time.time()
-        if moviment and now - last_trigger_time > TRIGGER_COOLDOWN_SECS:
+        # last_motion_check : rate-limite les vérifications YOLO sur mouvement non confirmé.
+        # last_trigger_time : cooldown long après un déclenchement réellement confirmé.
+        if (moviment and now - last_motion_check > YOLO_CHECK_COOLDOWN_SECS
+                and now - last_trigger_time > TRIGGER_COOLDOWN_SECS):
+            last_motion_check = now
             log("Mouvement détecté")
-            last_trigger_time = now
-            beep_stop = Event()
-            beep_procs = beep(1, stop_event=beep_stop)
-            Thread(target=record_video,
-                   args=(url, auth, list(prebuffer_frames)),
-                   kwargs={"duration": args.record_duration, "fps": args.fps},
-                   daemon=True).start()
-            ui_queue.put(("show_video",
-                          build_video_data(prebuffer_frames, url, auth, args.fps, args.prebuffer_secs, args.live_secs,
-                                         beep_stop, beep_procs)))
-        prev = gray
+            confirmed, label, conf = confirm_interesting_object(url, auth, frame)
+            if confirmed:
+                last_trigger_time = now
+                log(f"Confirmation YOLO: {label or 'fail-open'} ({conf:.2f})")
+                beep_stop = Event()
+                beep_procs = beep(1, stop_event=beep_stop)
+                Thread(target=record_video,
+                       args=(url, auth, list(prebuffer_frames)),
+                       kwargs={"duration": args.record_duration, "fps": args.fps},
+                       daemon=True).start()
+                ui_queue.put(("show_video",
+                              build_video_data(prebuffer_frames, url, auth, args.fps, args.prebuffer_secs, args.live_secs,
+                                             beep_stop, beep_procs)))
+            else:
+                log("Confirmation YOLO: aucune classe interessante")
         time.sleep(delay)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -626,7 +686,7 @@ def main():
     p.add_argument("--prebuffer-secs", type=int, default=PREBUFFER_SECS, help="Durée du prébuffer (s)")
     p.add_argument("--live-secs", type=int, default=LIVE_SECS, help="Durée du live (s)")
     p.add_argument("--record-duration", type=int, default=RECORD_DURATION, help="Durée d'enregistrement live (s)")
-    p.add_argument("--sensitivity", type=int, default=SENSITIVITY_DEFAULT, help="Seuil diff (1-255)")
+    p.add_argument("--sensitivity", type=int, default=SENSITIVITY_DEFAULT, help="Ignoré (MOG2 utilise MOG2_VAR_THRESHOLD) - conservé pour compat CLI")
     p.add_argument("--min-area", type=int, default=MIN_AREA_DEFAULT, help="Surface min px²")
     p.add_argument("--max-age-hours", type=int, default=MAX_AGE_HOURS_DEFAULT, help="Rétention vidéos")
     p.add_argument("--test", action="store_true", help="Simule un mouvement toutes les 40s")
