@@ -58,6 +58,12 @@ INTERESTING_CLASSES = {0: "personne", 1: "velo", 2: "voiture", 3: "moto", 5: "bu
 FPS_DEFAULT = 10
 SENSITIVITY_DEFAULT = 100
 MIN_AREA_DEFAULT = 80
+
+# Détection de frames corrompues (bandes vert/magenta néon de la caméra)
+# Calibré : frame corrompue ≈ 0.31 de fraction néon, frames normales = 0.0
+CORRUPT_SAT_MIN = 150       # saturation HSV mini pour qu'un pixel compte comme "néon"
+CORRUPT_VAL_MIN = 100       # luminosité HSV mini (ignore le bruit sombre)
+CORRUPT_SAT_FRAC_MAX = 0.05  # fraction max de pixels néon avant de juger la frame corrompue
 TRIGGER_COOLDOWN_SECS = 25  # évite les déclenchements trop fréquents
 
 # Enregistrement (durée en secondes)
@@ -133,6 +139,26 @@ def fetch_image(url: str, auth: tuple[str, str]):
     except requests.RequestException as e:
         log(f"Erreur récupération image : {e}")
         return None
+
+def is_corrupted_frame(frame) -> bool:
+    """Vrai si la frame présente la signature de corruption caméra
+    (forte proportion de pixels saturés en vert néon ou magenta).
+    Fail-open : retourne False en cas d'erreur pour ne jamais aveugler la caméra.
+    """
+    try:
+        if frame is None or frame.size == 0:
+            return False
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+        strong = (s >= CORRUPT_SAT_MIN) & (v >= CORRUPT_VAL_MIN)
+        green = (h >= 45) & (h <= 85)      # vert néon (OpenCV H 0-179, exclut le cyan)
+        magenta = (h >= 140) & (h <= 170)  # magenta
+        neon = strong & (green | magenta)
+        fraction = float(neon.sum()) / neon.size
+        return fraction > CORRUPT_SAT_FRAC_MAX
+    except Exception as e:
+        log(f"is_corrupted_frame erreur : {e}")
+        return False
 
 def beep(n: int, delay: int = BEEP_DELAY,
          path: str = BEEP_PATH, stop_event=None) -> list:
@@ -536,6 +562,11 @@ def detection(args):
     while not stop_event.is_set():
         frame = fetch_image(url, auth)
         if frame is None:
+            time.sleep(delay)
+            continue
+
+        if is_corrupted_frame(frame):
+            log("Frame corrompue ignorée")
             time.sleep(delay)
             continue
 
