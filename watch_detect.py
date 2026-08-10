@@ -5,9 +5,11 @@ import os
 import signal
 
 SCRIPT_NAME = "app/detect.py"
-PYTHON_PATH = "/home/m/Bureau/camera-venv/bin/python3"
-SCRIPT_PATH = "/home/m/Bureau/camera-venv/app/detect.py"
-LOG_PATH = "/home/m/Bureau/camera-venv/app/logs/detect.log"
+# Racine du projet deduite de l'emplacement du script (survit aux deplacements)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PYTHON_PATH = os.path.join(ROOT, "bin/python3")
+SCRIPT_PATH = os.path.join(ROOT, "app/detect.py")
+LOG_PATH = os.path.join(ROOT, "app/logs/detect.log")
 
 def is_running():
     try:

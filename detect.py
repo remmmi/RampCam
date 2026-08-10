@@ -34,7 +34,7 @@ LIVE_SECS = 10
 
 # Chemins et périphériques
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CAPTURES_DIR = os.path.expanduser("/home/m/Bureau/camera-venv/app/captures")
+CAPTURES_DIR = os.path.join(APP_DIR, "captures")
 MASK_PATH = os.path.join(APP_DIR, "masque.png")
 BEEP_PATH = os.path.join(APP_DIR, "klaxon.aac")
 
@@ -57,7 +57,7 @@ INTERESTING_CLASSES = {0: "personne", 1: "velo", 2: "voiture", 3: "moto", 5: "bu
 # Framerate unique (analyse, UI, enregistrement)
 FPS_DEFAULT = 10
 SENSITIVITY_DEFAULT = 100
-MIN_AREA_DEFAULT = 80
+MIN_AREA_DEFAULT = 400  # 16/06: 80 trop bas, MOG2 declenchait sur le bruit du capteur
 
 # Détection de frames corrompues (bandes vert/magenta néon de la caméra)
 # Calibré : frame corrompue ≈ 0.31 de fraction néon, frames normales = 0.0
@@ -67,13 +67,20 @@ CORRUPT_SAT_FRAC_MAX = 0.05  # fraction max de pixels néon avant de juger la fr
 
 # Détection à 2 étages : fond adaptatif (MOG2) + confirmation YOLO
 MOG2_HISTORY = 500            # nb de frames pour le modèle de fond
-MOG2_VAR_THRESHOLD = 16       # seuil de variance MOG2 (défaut OpenCV)
-YOLO_CONFIRM_CONF = 0.4       # confiance mini pour confirmer une classe
+MOG2_VAR_THRESHOLD = 25       # 16 (defaut OpenCV) trop sensible au bruit ; 25 = plus robuste
+YOLO_CONFIRM_CONF = 0.55      # 0.4 laissait passer les faux "personne" (ombres du matin a 0.40-0.47)
 YOLO_CONFIRM_FRAMES = 3       # nb de frames saines à analyser au plus
 YOLO_CONFIRM_INTERVAL = 0.2   # délai (s) entre frames de la rafale
 YOLO_CONFIRM_MAX_FETCH = 6    # borne de tentatives (anti-boucle si glitch en rafale)
 YOLO_CHECK_COOLDOWN_SECS = 2  # délai mini entre deux confirmations YOLO sur mouvement non confirmé
                               # (compromis : plus court = plus réactif mais plus de CPU YOLO)
+MOTION_BOX_MARGIN_PX = 40     # marge autour des contours en mouvement pour le recoupement YOLO
+                              # (tolère le déplacement de l'objet pendant la rafale de confirmation)
+STATIC_SUPPRESS_AFTER = 2     # nb de confirmations au meme endroit avant de juger l'objet statique
+                              # (2 = une seule alerte pour un objet qui arrive puis reste immobile)
+STATIC_IOU_MIN = 0.6          # recouvrement mini pour considerer que c'est le meme objet
+STATIC_FORGET_SECS = 86400    # sans re-confirmation pendant ce delai (24h), l'objet statique est oublie
+STARTUP_WARMUP_SECS = 10      # pas de declenchement au demarrage, le temps que MOG2 apprenne le fond
 TRIGGER_COOLDOWN_SECS = 25  # évite les déclenchements trop fréquents
 
 # Enregistrement (durée en secondes)
@@ -312,13 +319,78 @@ def is_interesting_detection(class_id, confidence, threshold=YOLO_CONFIRM_CONF):
     """Règle de décision : vrai si la classe est surveillée ET la confiance suffisante."""
     return class_id in INTERESTING_CLASSES and confidence >= threshold
 
-def _best_interesting(outputs, w, h, mask=None):
+def _motion_boxes(contours, min_area, w, h):
+    """Boîtes englobantes (x, y, w, h) des contours d'aire >= min_area,
+    élargies de MOTION_BOX_MARGIN_PX et clampées aux dimensions de la frame."""
+    boxes = []
+    for c in contours:
+        if cv2.contourArea(c) < min_area:
+            continue
+        x, y, bw, bh = cv2.boundingRect(c)
+        x0 = max(0, x - MOTION_BOX_MARGIN_PX)
+        y0 = max(0, y - MOTION_BOX_MARGIN_PX)
+        x1 = min(w, x + bw + MOTION_BOX_MARGIN_PX)
+        y1 = min(h, y + bh + MOTION_BOX_MARGIN_PX)
+        boxes.append((x0, y0, x1 - x0, y1 - y0))
+    return boxes
+
+
+def _overlaps_any(box, boxes):
+    """Vrai si le rectangle (x, y, w, h) chevauche au moins un rectangle de boxes."""
+    x, y, bw, bh = box
+    for mx, my, mw, mh in boxes:
+        if x < mx + mw and mx < x + bw and y < my + mh and my < y + bh:
+            return True
+    return False
+
+
+def _warmup_active(started_at, now):
+    """Vrai pendant la periode de chauffe qui suit le demarrage de la surveillance."""
+    return now - started_at < STARTUP_WARMUP_SECS
+
+
+def _iou(a, b):
+    """Intersection sur union de deux rectangles (x, y, w, h)."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
+    inter = ix * iy
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+# Objets confirmes par YOLO mais immobiles (ex : voiture garee dont les reflets
+# declenchent le detecteur de mouvement). Rempli/consulte par _static_check.
+static_objects = []
+
+
+def _static_check(registry, class_id, box, now):
+    """Enregistre une confirmation YOLO et renvoie True si l'objet doit etre
+    supprime : meme classe confirmee STATIC_SUPPRESS_AFTER fois ou plus au meme
+    endroit (IoU >= STATIC_IOU_MIN). Les entrees sans re-confirmation depuis
+    STATIC_FORGET_SECS sont oubliees (l'objet redevient signalable)."""
+    registry[:] = [e for e in registry if now - e["last_seen"] <= STATIC_FORGET_SECS]
+    for e in registry:
+        if e["class_id"] == class_id and _iou(e["box"], box) >= STATIC_IOU_MIN:
+            e["count"] += 1
+            e["last_seen"] = now
+            return e["count"] >= STATIC_SUPPRESS_AFTER
+    registry.append({"class_id": class_id, "box": box, "count": 1, "last_seen": now})
+    return False
+
+
+def _best_interesting(outputs, w, h, mask=None, motion_boxes=None):
     """Meilleure (class_id, confiance) parmi les classes surveillées, (None, 0.0) sinon.
     - Confiance = objectness * proba_classe (confiance YOLO standard).
     - Si un masque est fourni, le centre de la boîte doit tomber dans une zone
-      surveillée (mask[cy, cx] != 0) ; sinon la détection est ignorée."""
+      surveillée (mask[cy, cx] != 0) ; sinon la détection est ignorée.
+    - Si motion_boxes est fourni, la boîte YOLO doit chevaucher au moins une
+      zone en mouvement ; sinon la détection est ignorée (objet statique).
+    - Renvoie aussi la boîte pixels (x, y, w, h) de la détection retenue (ou None)."""
     best_conf = 0.0
     best_id = None
+    best_box = None
     for output in outputs:
         for detection in output:
             objectness = float(detection[4])
@@ -332,12 +404,19 @@ def _best_interesting(outputs, w, h, mask=None):
                 cy = int(detection[1] * h)
                 if cx < 0 or cy < 0 or cx >= w or cy >= h or mask[cy, cx] == 0:
                     continue
+            bw = int(detection[2] * w)
+            bh = int(detection[3] * h)
+            bx = int(detection[0] * w) - bw // 2
+            by = int(detection[1] * h) - bh // 2
+            if motion_boxes is not None and not _overlaps_any((bx, by, bw, bh), motion_boxes):
+                continue
             best_conf = confidence
             best_id = class_id
-    return best_id, best_conf
+            best_box = (bx, by, bw, bh)
+    return best_id, best_conf, best_box
 
 
-def _detect_interesting(frame, mask=None):
+def _detect_interesting(frame, mask=None, motion_boxes=None):
     """Renvoie (class_id, confiance) de la meilleure détection d'une classe surveillée
     dans la zone du masque, (None, 0.0) sinon.
     Ne capture PAS les exceptions : elles remontent pour le fail-safe."""
@@ -345,26 +424,34 @@ def _detect_interesting(frame, mask=None):
     blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
     yolo_net.setInput(blob)
     outputs = yolo_net.forward(yolo_output_layers)
-    return _best_interesting(outputs, w, h, mask)
+    return _best_interesting(outputs, w, h, mask, motion_boxes)
 
 
-def confirm_interesting_object(url, auth, first_frame, mask=None):
+def confirm_interesting_object(url, auth, first_frame, mask=None, motion_boxes=None):
     """Confirme la présence d'une classe surveillée via YOLO sur une rafale de frames.
     Renvoie (confirmé: bool, label: str|None, confiance: float).
     - Analyse d'abord first_frame (déjà filtrée), puis récupère des frames live.
     - Ignore les frames corrompues / None (ne comptent pas, on en refetch une autre).
     - Restreint les détections à la zone du masque (objet hors zone = ignoré).
+    - Restreint aux détections chevauchant une zone en mouvement (objet statique = ignoré).
+    - Supprime les objets confirmés en boucle au même endroit (voir _static_check).
     - Fail-safe : YOLO indisponible ou inférence en erreur -> (True, None, 0.0)."""
     if yolo_net is None:
         return True, None, 0.0
     frame = first_frame
     analysed = 0
+    static_logged = False
     try:
         for _ in range(YOLO_CONFIRM_MAX_FETCH):
             if frame is not None and not is_corrupted_frame(frame):
-                class_id, conf = _detect_interesting(frame, mask)
+                class_id, conf, box = _detect_interesting(frame, mask, motion_boxes)
                 if class_id is not None and is_interesting_detection(class_id, conf):
-                    return True, INTERESTING_CLASSES[class_id], conf
+                    if _static_check(static_objects, class_id, box, time.time()):
+                        if not static_logged:
+                            log(f"Confirmation YOLO: {INTERESTING_CLASSES[class_id]} statique, ignore")
+                            static_logged = True
+                    else:
+                        return True, INTERESTING_CLASSES[class_id], conf
                 analysed += 1
                 if analysed >= YOLO_CONFIRM_FRAMES:
                     break
@@ -637,6 +724,7 @@ def detection(args):
     # Laisse la CLI overrider la rétention via --max-age-hours
     Thread(target=clean_old_videos, args=(CAPTURES_DIR, args.max_age_hours, CLEAN_INTERVAL_SECONDS), daemon=True).start()
     log("Surveillance démarrée")
+    warmup_started = time.time()
 
     while not stop_event.is_set():
         frame = fetch_image(url, auth)
@@ -669,16 +757,19 @@ def detection(args):
             fgmask = cv2.bitwise_and(fgmask, fgmask, mask=mask_rs)
 
         contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        moviment = any(cv2.contourArea(c) >= args.min_area for c in contours)
+        motion_boxes = _motion_boxes(contours, args.min_area, frame.shape[1], frame.shape[0])
+        moviment = bool(motion_boxes)
 
         now = time.time()
         # last_motion_check : rate-limite les vérifications YOLO sur mouvement non confirmé.
         # last_trigger_time : cooldown long après un déclenchement réellement confirmé.
-        if (moviment and now - last_motion_check > YOLO_CHECK_COOLDOWN_SECS
+        if (moviment and not _warmup_active(warmup_started, now)
+                and now - last_motion_check > YOLO_CHECK_COOLDOWN_SECS
                 and now - last_trigger_time > TRIGGER_COOLDOWN_SECS):
             last_motion_check = now
             log("Mouvement détecté")
-            confirmed, label, conf = confirm_interesting_object(url, auth, frame, mask_rs)
+            confirmed, label, conf = confirm_interesting_object(url, auth, frame, mask_rs,
+                                                                motion_boxes)
             if confirmed:
                 last_trigger_time = now
                 log(f"Confirmation YOLO: {label or 'fail-open'} ({conf:.2f})")

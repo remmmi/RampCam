@@ -7,7 +7,8 @@
 export DISPLAY=:0
 export XAUTHORITY=/home/m/.Xauthority
 
-VENV=/home/m/Bureau/camera-venv
+# Racine du projet deduite de l'emplacement du script (survit aux deplacements)
+VENV="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="$VENV/bin/python3"
 SCRIPT="$VENV/app/detect.py"
 LOG="$VENV/detect.log"
