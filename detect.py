@@ -38,13 +38,18 @@ CAPTURES_DIR = os.path.join(APP_DIR, "captures")
 MASK_PATH = os.path.join(APP_DIR, "masque.png")
 BEEP_PATH = os.path.join(APP_DIR, "klaxon.aac")
 
-# Caméra / flux
-CAMERA_URL = "http://192.168.1.111/cgi-bin/viewer/video.jpg?streamid=3&resolution=640x480&quality=5"
-CAMERA_AUTH = ("admin", "password")
+# Caméra / flux + notification ntfy : les valeurs sensibles (URL, identifiants,
+# topic) vivent dans config_local.py, non versionné (modèle : config_local.example.py)
+try:
+    from config_local import CAMERA_URL, CAMERA_AUTH, NTFY_TOPIC
+except ImportError:
+    raise SystemExit(
+        "config_local.py manquant : copier config_local.example.py vers "
+        "config_local.py et renseigner CAMERA_URL, CAMERA_AUTH et NTFY_TOPIC"
+    )
 FETCH_TIMEOUT = 5  # s
 
 # Notification ntfy
-NTFY_TOPIC = "https://ntfy.sh/your-private-topic"
 NTFY_COOLDOWN_SECS = 120  # delai minimum entre deux envois d'images
 NTFY_CANDIDATE_SECONDS = [5, 7, 9, 11]  # secondes de capture pour selection intelligente
 
