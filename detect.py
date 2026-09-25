@@ -34,7 +34,8 @@ LIVE_SECS = 10
 
 # Chemins et périphériques
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CAPTURES_DIR = os.path.join(APP_DIR, "captures")
+# Vidéos et logs : chemins définis dans settings.conf
+from settings import CAPTURES_DIR, LOGS_DIR
 MASK_PATH = os.path.join(APP_DIR, "masque.png")
 BEEP_PATH = os.path.join(APP_DIR, "klaxon.aac")
 
@@ -143,9 +144,8 @@ def log(message: str) -> None:
     line = f"{timestamp} {message}"
     print(line)
 
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, now.strftime("%Y.%m.%d.detect.log"))
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    log_path = os.path.join(LOGS_DIR, now.strftime("%Y.%m.%d.detect.log"))
 
     try:
         with open(log_path, "a", encoding="utf-8") as fp:
@@ -601,6 +601,7 @@ def record_video(url, auth, prebuffer, duration=RECORD_DURATION, fps=FPS_DEFAULT
 
 def clean_old_videos(folder=CAPTURES_DIR,
                      max_age_hours=MAX_AGE_HOURS_DEFAULT, interval_seconds=CLEAN_INTERVAL_SECONDS):
+    os.makedirs(folder, exist_ok=True)
     while not stop_event.is_set():
         now = datetime.datetime.now()
         for f in os.listdir(folder):

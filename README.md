@@ -112,4 +112,4 @@ warm-up behavior and the corrupted frame filter.
 ## Notes
 
 - Code and log messages are in French.
-- Logs are written to `logs/YYYY.MM.DD.detect.log`.
+- Data paths (videos, logs, annotated output) are set in `settings.conf`, section `[paths]`. Defaults live outside the project tree, in `~/Vidéos/RampCam_videos/`.

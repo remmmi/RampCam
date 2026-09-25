@@ -28,7 +28,7 @@ if [[ $# -gt 0 ]]; then
   "$@"
 else
   # Commande par défaut: classer tout le dossier captures en headless et sauvegarder les vidéos annotées
-  python3 app/classify.py app/captures/ -r --conf 0.35 --nms 0.45 --width 640 --no-display --save --out-dir app/captures2
+  python3 app/classify.py "$(python3 app/settings.py captures_dir)" -r --conf 0.35 --nms 0.45 --width 640 --no-display --save --out-dir "$(python3 app/settings.py annotated_dir)"
 fi
 
 deactivate

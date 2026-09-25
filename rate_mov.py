@@ -1,6 +1,7 @@
 import cv2
 import os
 import re
+from settings import CAPTURES_DIR
 from statistics import stdev
 
 motion_tests = []
@@ -195,7 +196,7 @@ def score_video_file(path):
     score = compute_motion_score(frames, base_name)
     return score
 
-def rescore_videos(directory="./captures"):
+def rescore_videos(directory=CAPTURES_DIR):
     avi_files = [f for f in os.listdir(directory) if f.lower().endswith(".avi")]
     avi_files = sorted(avi_files, key=lambda f: os.path.getmtime(os.path.join(directory, f)))
     for file in avi_files:
@@ -217,7 +218,7 @@ def rescore_videos(directory="./captures"):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Rescore .avi videos in a directory or a single video file.")
-    parser.add_argument("input", nargs="?", default="./captures", help="Dossier ou fichier à analyser (défaut: ./captures)")
+    parser.add_argument("input", nargs="?", default=CAPTURES_DIR, help=f"Dossier ou fichier à analyser (défaut: {CAPTURES_DIR})")
     args = parser.parse_args()
 
     if os.path.isdir(args.input):

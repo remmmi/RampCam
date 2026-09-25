@@ -11,7 +11,9 @@ export XAUTHORITY=/home/m/.Xauthority
 VENV="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="$VENV/bin/python3"
 SCRIPT="$VENV/app/detect.py"
-LOG="$VENV/detect.log"
+LOG_DIR="$("$PYTHON" "$VENV/app/settings.py" logs_dir)" || exit 1
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/watchdog.log"
 LOCK=/tmp/cron_detect.lock
 
 # Evite deux executions simultanees du watchdog

@@ -3,13 +3,15 @@ import subprocess
 import time
 import os
 import signal
+from settings import LOGS_DIR
 
 SCRIPT_NAME = "app/detect.py"
 # Racine du projet deduite de l'emplacement du script (survit aux deplacements)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON_PATH = os.path.join(ROOT, "bin/python3")
 SCRIPT_PATH = os.path.join(ROOT, "app/detect.py")
-LOG_PATH = os.path.join(ROOT, "app/logs/detect.log")
+LOG_PATH = os.path.join(LOGS_DIR, "watchdog.log")
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 def is_running():
     try:

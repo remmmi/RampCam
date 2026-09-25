@@ -5,6 +5,7 @@ import cv2
 import time
 import argparse
 from collections import deque, Counter
+from settings import ANNOTATED_DIR
 
 # Paths relative to this script
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -269,7 +270,7 @@ def main():
     parser.add_argument("-r", "--recursive", action="store_true", help="Parcourir récursivement le dossier")
     parser.add_argument("--no-display", action="store_true", help="Désactiver l'affichage des fenêtres (headless)")
     parser.add_argument("--save", action="store_true", help="Sauvegarder la vidéo annotée")
-    parser.add_argument("--out-dir", default=os.path.join(APP_DIR, "captures_annotated"), help="Dossier de sortie des vidéos annotées")
+    parser.add_argument("--out-dir", default=ANNOTATED_DIR, help="Dossier de sortie des vidéos annotées")
     parser.add_argument("--fourcc", default="mp4v", help="Codec de sortie (mp4v ou XVID)")
     parser.add_argument("--out-fps", type=float, default=0.0, help="FPS de sortie (0 = utiliser FPS source ou 25)")
     parser.add_argument("--stable-frames", type=int, default=5, help="Nombre de frames pour stabiliser une détection (vote)")
@@ -297,9 +298,9 @@ def main():
         # Message unique avec instructions
         print("[INFO] Environnement sans GUI: exécution en mode headless (pas d'affichage).")
         print("[INFO] Pour sauvegarder et visualiser les vidéos annotées:")
-        print("       - Exécutez: python3 app/classify.py <dossier_ou_fichier> --no-display --save --out-dir app/captures_annotated")
-        print("       - Les vidéos annotées seront dans: app/captures_annotated/")
-        print("       - Lecture: ffplay app/captures_annotated/annotated_*.mp4")
+        print("       - Exécutez: python3 app/classify.py <dossier_ou_fichier> --no-display --save")
+        print(f"       - Les vidéos annotées seront dans: {ANNOTATED_DIR}/")
+        print(f"       - Lecture: ffplay {ANNOTATED_DIR}/annotated_*.mp4")
         print("[INFO] Pour activer l'affichage fenêtré sur Ubuntu/Debian:")
         print("       sudo apt-get install -y libgtk-3-0 libgtk-3-dev python3-tk ffmpeg")
         print("       pip uninstall -y opencv-python-headless && pip install opencv-python")

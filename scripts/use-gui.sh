@@ -31,7 +31,7 @@ if [[ $# -gt 0 ]]; then
   "$@"
 else
   # Commande par défaut: lecture fenêtrée des vidéos du dossier captures
-  python3 app/classify.py app/captures/ -r --conf 0.35 --nms 0.45 --width 640
+  python3 app/classify.py "$(python3 app/settings.py captures_dir)" -r --conf 0.35 --nms 0.45 --width 640
 fi
 
 deactivate
